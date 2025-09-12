@@ -13,6 +13,7 @@ from	com.rma.client		import	Browser
 from	hec2.rts.script		import	RTS
 from	datetime			import	date, timedelta
 from	array				import	array
+import	csv
 
 def output(msg="") :
 	'''
@@ -44,22 +45,6 @@ def chkfcst(fcst) :
 		output("ERROR : %s" % msg)
 		raise Exception(msg)
 
-####################################################
-####			Project Metadata Setup			####
-####################################################
-ReservoirProject = "Mark Twain Lake"
-ProjectName = "Mark_Twain_Lake"		##### Name of Reservoir in ResSim
-PowerName = "Turbines"		##### Name of Power Plant in ResSim
-NumberUnits = 2
-MW_UH = 30				##### MW per Unit Hour (UH)
-Turbine_EF = 0		##### DSF per Unit Hour (UH) | Set to 0 to have it computed from ResSim Turbine Rating
-OutletNames = ["Tainter Gates"]		##### Name of other outlets in ResSim (i.e. ["Spill", "Sluice", "Orifice"])
-NoOutlets = len(OutletNames)
-ResSimNetwork = "Salt_River_Hydropower"		#### Name of ResSim Reservoir Network
-####################################################
-####################################################
-####################################################
-
 ## Get the current forecast ##
 frame = Browser.getBrowser().getBrowserFrame()
 proj = frame.getCurrentProject()
@@ -77,6 +62,30 @@ forecastDirectory = str(os.path.dirname(dssFileName))
 HOTDSSDirectory = os.path.join(forecastDirectory,'rss',"HOT")
 HOT_DSS = HOTDSSDirectory.replace("\\", "/")
 HOTFile = HecDss.open(HOT_DSS)
+
+################################################################################
+####			Project Selections and Metadata								####
+################################################################################
+HOTFiles_osDir = os.path.join(forecastDirectory,'..\\..\\..\\database\\HOT_Files')
+ProjectListFile = os.path.join(HOTFiles_osDir, "Project_List.txt")
+Project_List = open(ProjectListFile).read().splitlines()
+ReservoirProject = JOptionPane.showInputDialog(
+					None,"Select Project","Project List",
+					JOptionPane.PLAIN_MESSAGE,None,Project_List,Project_List[0])
+
+ProjectMetadataFile = os.path.join(HOTFiles_osDir, ReservoirProject+".txt")
+ProjectMetadata = open(ProjectMetadataFile,"r").readlines()
+ProjectName = str(ProjectMetadata[3]).strip()
+PowerName = str(ProjectMetadata[5]).strip()
+NumberUnits = float(ProjectMetadata[7])
+MW_UH = float(ProjectMetadata[9])
+Turbine_EF = float(ProjectMetadata[11])
+OutletNames = str(ProjectMetadata[13]).strip().split(", ")
+NoOutlets = len(OutletNames)
+ResSimNetwork = str(ProjectMetadata[15]).strip()
+################################################################################
+################################################################################
+################################################################################
 
 RSSNetworkDirectory = os.path.join(forecastDirectory,'rss', "_"+ResSimNetwork)
 RSSNetwork_DSS = RSSNetworkDirectory.replace("\\", "/")
@@ -102,9 +111,9 @@ OverrideFile_Dir = OverrideFile_osDir.replace("\\", "/")
 OverrideFile = HecDss.open(OverrideFile_Dir)
 
 ## SWPA Power Demand TS
-PowerDemandDSSFile_osDir = os.path.join(forecastDirectory,'..\\..\\..\\database\\SWPA_Power_Demand')
-PowerDemandDSSFile_Dir = PowerDemandDSSFile_osDir.replace("\\", "/")
-	
+PowerDemandFile_osDir = os.path.join(forecastDirectory,'..\\..\\..\\database\\HOT_Files\\SWPA_Demand.csv')
+PowerDemandFile = PowerDemandFile_osDir.replace("\\", "/")
+
 ## print 'fcstTimeWindowString : %s' %(fcstTimeWindowString)
 important_times = [ i.strip(' ') for i in fcstTimeWindowString.split(';') ]
 start_time, forecast_time, end_time = important_times[0], important_times[1], important_times[2]
@@ -197,7 +206,7 @@ class HOT(JDialog, ActionListener):
 		
 		# Daily Table inside scroll pane
 		baseDailyCols = ["Day","Date","Pool Elev","Inflow (dsf)","Power (MW)",
-						"EF (dsf/UH)","No Units","Turbine (dsf)"]
+						"EF (MW/kcfs)","No Units","Turbine (dsf)"]
 		outletDailyCols = ["%s (dsf)" % o for o in OutletNames]
 		
 		dailyCols = baseDailyCols + outletDailyCols + ["Total (dsf)"]
@@ -260,7 +269,7 @@ class HOT(JDialog, ActionListener):
 		
 		# Hourly Table
 		baseHourCols = ["Ending Hour","Pool Elev","Inflow (cfs)","Power (MW)",
-						"EF (dsf/UH)","No Units","Turbine (cfs)"]
+						"EF (MW/kcfs)","No Units","Turbine (cfs)"]
 		outletHourCols = ["%s (cfs)" % o for o in OutletNames]
 		hourCols = baseHourCols + outletHourCols + ["Total (cfs"]
 		
@@ -420,9 +429,43 @@ class HOT(JDialog, ActionListener):
 		ResSim_TurbineRating = RSSNetworkFile.read("/"+ProjectName+"/"+PowerName+"-Rating/Elev-Flow////")
 		ResSim_PoolStorRating = RSSNetworkFile.get("/"+ProjectName+"/Pool-Area Capacity/Elev-Stor-Area////")
 		
-		PowerDemandDSSFile = HecDss.open(PowerDemandDSSFile_Dir)
-		PowerDemandDSSFile.setTimeWindow(start_time, end_time)
-		PowerDemandCurve = PowerDemandDSSFile.read("//SWPA/Demand//1Hour/Seasonal_Varying/")
+		tsc = TimeSeriesContainer()
+		tsc.fullName = "//SWPA/Demand//1Hour/Seasonal_Varying/"
+		start = HecTime().set(forecast_time)
+		start_year = str(fcstStart_time.year())
+		print start_year
+		start = HecTime("01Jan"+start_year+",0100")
+		tsc.interval = 60
+		demand = []
+		parsed_with_csv = False
+		try:
+			with open(PowerDemandFile, 'r') as f:
+				reader = csv.reader(f)
+				for row in reader:
+					# skip empty rows or rows with fewer than 2 columns
+					if not row or len(row) < 2:
+						continue
+					
+					# try to parse the 2nd column as float	
+					try:
+						demand.append(float(row[1]))
+						parsed_with_csv = True
+					except ValueError:
+						# non?numeric or header – just skip it
+						pass
+		except Exception:
+			# something went wrong with the CSV reader itself
+			parsed_with_csv = False	
+		times =[]
+		for value in demand:
+			times.append(start.value())
+			start.add(tsc.interval)
+		tsc.times = times
+		tsc.values = demand
+		tsc.numberValues = len(demand)
+		tsc.units ="CFS"
+		tsc.type = "PER-AVER"
+		HOTFile.put(tsc)
 		
 		SetNoUnits_0 = CWMS_Power_1H.multiply(0)
 		SetNoUnits_1H = SetNoUnits_0.add(NumberUnits)
@@ -438,7 +481,9 @@ class HOT(JDialog, ActionListener):
 			SetTurbineEF_1H.setType("PER-AVER")
 			SetTurbineEF_1D = SetTurbineEF_1H.transformTimeSeries("1Day", "0M", "AVE")
 		else:
-			SetTurbineEF_1D = ResSim_TurbineRating.ratingTableInterpolation(PoolElev_1D).divide(24)
+			SetTurbineEF_KCFS_Cap = ResSim_TurbineRating.ratingTableInterpolation(PoolElev_1D).divide(1000)
+			SetTurbineEF_KCFS_MW = SetTurbineEF_KCFS_Cap.divide(MW_UH * 24)
+			SetTurbineEF_1D = SetTurbineEF_KCFS_MW.inverse()
 			SetTurbineEF_1D.setLocation(""+ProjectName+"-"+PowerName+"")
 			SetTurbineEF_1D.setParameterPart("EF")
 			SetTurbineEF_1D.setUnits("CFS")
@@ -451,7 +496,6 @@ class HOT(JDialog, ActionListener):
 		HOTFile.write(SetTurbineEF_1D)
 		HOTFile.write(ResSim_TurbineRating)
 		HOTFile.put(ResSim_PoolStorRating)
-		HOTFile.write(PowerDemandCurve)
 		
 		MessageBox.showInformation("Physical Data Extracted.", "Data Extract Complete")
 		
@@ -555,9 +599,10 @@ class HOT(JDialog, ActionListener):
 		PowerGenHrs_Cap = PowerGenHrs_Min.subtract(noUnitsTS_Hr)
 		PowerGenHrs_Max = PowerGenHrs_Cap.screenWithMaxMin(-1000000.0, 0.0, 1000000.0, 1, 0.0, "")
 		PowerGen_UH = PowerGenHrs_Max.add(noUnitsTS_Hr)
+		PowerGen_MW = PowerGen_UH.multiply(MW_UH)
 		
-		Turbine_Capacity = efTS_Hr.multiply(24)
-		Turbine_Release = Turbine_Capacity.multiply(PowerGen_UH)
+		KCFS_MW = efTS_Hr.inverse()
+		Turbine_Release = PowerGen_MW.multiply(KCFS_MW).multiply(1000 * 24)
 		Turbine_Release.setPathname("//"+ProjectName+"-"+PowerName+"/Flow//1Hour/"+ActiveRSSAlt_Fpart+"/")
 		Turbine_Release.setUnits("CFS")
 		Turbine_Release.setType("PER-AVER")
@@ -706,7 +751,7 @@ class HOT(JDialog, ActionListener):
 		Power_Hr.setVersion(ActiveRSSAlt_Fpart)
 		HOTFile.write(Power_Hr)
 		
-		Flow2Power = EF.divide(MW_UH)
+		Flow2Power = EF.inverse().multiply(1000)
 		Turbine = Power.multiply(Flow2Power)
 		Turbine.setUnits("CFS")
 		Turbine.setParameterPart("Flow")
@@ -781,8 +826,9 @@ class HOT(JDialog, ActionListener):
 		OutletTS		= [HOTFile.read("//%s-%s/Flow//1Day/%s/" % (ProjectName, o, ActiveRSSAlt_Fpart)) for o in OutletNames]
 		
 		##	Controlling Flow
-		MaxPowerUH = NoUnits.multiply(24)
-		TurbineCap = MaxPowerUH.multiply(EF)
+		MaxPower = NoUnits.multiply(24).multiply(MW_UH)
+		Power2Flow = EF.inverse().multiply(1000)
+		TurbineCap = MaxPower.multiply(Power2Flow)
 		TurbineCap.setUnits("CFS")
 		TurbineCap.setParameterPart("Flow-Capacity")
 		HOTFile.write(TurbineCap)
@@ -794,8 +840,8 @@ class HOT(JDialog, ActionListener):
 		Turbine.setType("PER-AVER")
 		HOTFile.write(Turbine)
 		
-		Flow2Power = EF.divide(MW_UH)
-		Power = Turbine.divide(Flow2Power)
+		Flow2Power = EF.divide(1000)
+		Power = Turbine.multiply(Flow2Power)
 		Power.setUnits("MW")
 		Power.setParameterPart("Power")
 		Power.setType("PER-AVER")
@@ -924,8 +970,8 @@ class HOT(JDialog, ActionListener):
 		Power.setParameterPart("Power")
 		HOTFile.write(Power)
 		
-		Flow2Power = EF.divide(MW_UH).multiply(24)
-		Turbine = Power.multiply(Flow2Power)
+		Power2Flow = EF.inverse().multiply(1000 * 24)
+		Turbine = Power.multiply(Power2Flow)
 		Turbine.setUnits("CFS")
 		Turbine.setParameterPart("Flow")
 		Turbine.setType("PER-AVER")
@@ -1007,7 +1053,9 @@ class HOT(JDialog, ActionListener):
 		TurbineDemand	= HOTFile.read("//"+ProjectName+"-"+PowerName+"/Flow-Demand//1Hour/"+ActiveRSSAlt_Fpart+"/")
 		OutletTS		= [HOTFile.read("//%s-%s/Flow//1Hour/%s/" % (ProjectName, o, ActiveRSSAlt_Fpart)) for o in OutletNames]
 		
-		TurbineCap = EF.multiply(NoUnits).multiply(24)
+		MaxPower = NoUnits.multiply(MW_UH)
+		Power2Flow = EF.inverse().multiply(1000 * 24)
+		TurbineCap = MaxPower.multiply(Power2Flow) #EF.multiply(NoUnits).multiply(24)
 		TurbineCap.setUnits("CFS")
 		TurbineCap.setParameterPart("Flow-Capacity")
 		HOTFile.write(TurbineCap)
@@ -1019,8 +1067,8 @@ class HOT(JDialog, ActionListener):
 		Turbine.setType("PER-AVER")
 		HOTFile.write(Turbine)
 		
-		Flow2Power = EF.divide(MW_UH).multiply(24)
-		Power = Turbine.divide(Flow2Power)
+		Flow2Power = EF.divide(1000 * 24)
+		Power = Turbine.multiply(Flow2Power)
 		Power.setUnits("CFS")
 		Power.setParameterPart("Power")
 		Power.setType("PER-AVER")

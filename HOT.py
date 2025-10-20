@@ -1,7 +1,7 @@
 from	java.awt			import	Frame, EventQueue, Font
 from	java.awt.event		import	ActionListener
 from	java.lang			import	Runnable
-from	javax.swing			import	JDialog, JFrame, JPanel, JLabel, JScrollPane, JTable, JButton, JOptionPane, SpringLayout, ScrollPaneConstants, ListSelectionModel
+from	javax.swing			import	JDialog, JFrame, JPanel, JLabel, JScrollPane, JTable, JButton, JOptionPane, SpringLayout, ScrollPaneConstants, ListSelectionModel, SwingUtilities
 from	javax.swing.border	import	EmptyBorder
 from	javax.swing.table	import	DefaultTableModel
 from	hec.dssgui			import	ListSelection
@@ -72,7 +72,7 @@ Project_List = open(ProjectListFile).read().splitlines()
 ReservoirProject = JOptionPane.showInputDialog(
 					None,"Select Project","Project List",
 					JOptionPane.PLAIN_MESSAGE,None,Project_List,Project_List[0])
-
+					
 ProjectMetadataFile = os.path.join(HOTFiles_osDir, ReservoirProject+".txt")
 ProjectMetadata = open(ProjectMetadataFile,"r").readlines()
 ProjectName = str(ProjectMetadata[3]).strip()
@@ -83,6 +83,8 @@ Turbine_EF = float(ProjectMetadata[11])
 OutletNames = str(ProjectMetadata[13]).strip().split(", ")
 NoOutlets = len(OutletNames)
 ResSimNetwork = str(ProjectMetadata[15]).strip()
+ObservedTurbine = str(ProjectMetadata[20]).strip()
+ObservedPower = str(ProjectMetadata[22]).strip()
 ################################################################################
 ################################################################################
 ################################################################################
@@ -111,19 +113,34 @@ OverrideFile_Dir = OverrideFile_osDir.replace("\\", "/")
 OverrideFile = HecDss.open(OverrideFile_Dir)
 
 ## SWPA Power Demand TS
-PowerDemandFile_osDir = os.path.join(forecastDirectory,'..\\..\\..\\database\\HOT_Files\\SWPA_Demand.csv')
+PowerDemandFile_osDir = os.path.join(forecastDirectory,'..\\..\\..\\database\\HOT_Files\\Demand.csv')
 PowerDemandFile = PowerDemandFile_osDir.replace("\\", "/")
 
 ## print 'fcstTimeWindowString : %s' %(fcstTimeWindowString)
 important_times = [ i.strip(' ') for i in fcstTimeWindowString.split(';') ]
 start_time, forecast_time, end_time = important_times[0], important_times[1], important_times[2]
 
+## Time Window Setups
 HOT_start = HecTime()
 HOT_start.set(forecast_time)
 HOT_start.addDays(-1)
 HOT_start_string = str(HOT_start)
 
+Obs_start = HecTime()
+Obs_start.set(start_time)
+Obs_start.addHours(-12)
+Obs_start_string = str(Obs_start)
+
 HOTFile.setTimeWindow(HOT_start_string, end_time)
+
+obsStart_time = HecTime()
+obsStart_time.set(start_time)
+
+obsEnd_time = HecTime()
+obsEnd_time.set(forecast_time)
+obsEnd_time.addDays(-1)
+
+obs_window = obsEnd_time.julian() - obsStart_time.julian() + 1
 
 fcstStart_time = HecTime()
 fcstStart_time.set(forecast_time)
@@ -170,7 +187,7 @@ class HOT(JDialog, ActionListener):
 		
 		# window settings
 		self.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE)
-		self.setBounds(100, 100, 1000, 930)
+		self.setBounds(50, 50, 1000, 1100)
 		
 		# Title
 		lblRes = JLabel(ReservoirProject)
@@ -179,12 +196,12 @@ class HOT(JDialog, ActionListener):
 		sl.putConstraint(SpringLayout.WEST,  lblRes, 10, SpringLayout.WEST,  content)
 		content.add(lblRes)
 		
-		# Daily Section Label
-		lblDaily = JLabel("Daily Hydropower Overrides")
-		lblDaily.setFont(Font("Tahoma", Font.BOLD, 14))
-		sl.putConstraint(SpringLayout.NORTH, lblDaily, 10, SpringLayout.SOUTH, lblRes)
-		sl.putConstraint(SpringLayout.WEST,  lblDaily, 10, SpringLayout.WEST,  lblRes)
-		content.add(lblDaily)
+		# Daily Obs Section Label
+		lblObsDaily = JLabel("Daily Observed Data")
+		lblObsDaily.setFont(Font("Tahoma", Font.BOLD, 14))
+		sl.putConstraint(SpringLayout.NORTH, lblObsDaily, 10, SpringLayout.SOUTH, lblRes)
+		sl.putConstraint(SpringLayout.WEST,  lblObsDaily, 10, SpringLayout.WEST,  lblRes)
+		content.add(lblObsDaily)
 		
 		self.btnImportPhysical = JButton("Import Physical Data")
 		self.btnImportPhysical.addActionListener(self)
@@ -197,6 +214,49 @@ class HOT(JDialog, ActionListener):
 		sl.putConstraint(SpringLayout.NORTH, self.btnImportForecast, 0, SpringLayout.NORTH, lblRes)
 		sl.putConstraint(SpringLayout.EAST,  self.btnImportForecast, -6, SpringLayout.WEST, self.btnImportPhysical)
 		content.add(self.btnImportForecast)
+		
+		self.btnLoadDailyObs = JButton("Load Daily Observed Data")
+		self.btnLoadDailyObs.addActionListener(self)
+		sl.putConstraint(SpringLayout.NORTH, self.btnLoadDailyObs, 0, SpringLayout.NORTH, lblObsDaily)
+		sl.putConstraint(SpringLayout.EAST,  self.btnLoadDailyObs, -20, SpringLayout.EAST, content)
+		content.add(self.btnLoadDailyObs)
+		
+		# Daily Observed Table inside scroll pane
+		baseDailyObsCols = ["Day","Date","Pool Elev","Inflow (dsf)","Power (MW)",
+						"EF (MW/kcfs)","No Units","Turbine (dsf)"]
+		outletDailyObsCols = ["%s (dsf)" % o for o in OutletNames]
+		
+		dailyObsCols = baseDailyObsCols + outletDailyObsCols + ["Total (dsf)"]
+		
+		dailyObsData = []
+		dailyObsEditable = [False,False,False,False,False,True,False,False] + [False]*NoOutlets + [False]
+		self.dailyObsCols = dailyObsCols
+		self.dailyObsEditableCols = dailyObsEditable
+		self.dailyObsModel = MyTableModel(dailyObsData, dailyObsCols, dailyObsEditable)
+		
+		self.dailyObsTable = JTable(self.dailyObsModel)
+		self.dailyObsTable.setSelectionMode(ListSelectionModel.SINGLE_INTERVAL_SELECTION)
+		# set col widths
+		for i in range(len(dailyObsCols)):
+		    colObs = self.dailyObsTable.getColumnModel().getColumn(i)
+		    colObs.setMinWidth(75)
+		    colObs.setMaxWidth(150)
+		
+		self.dailyObsSP = JScrollPane(self.dailyObsTable)
+		self.dailyObsSP.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS)
+		sl.putConstraint(SpringLayout.NORTH, self.dailyObsSP, 20, SpringLayout.SOUTH, lblObsDaily)
+		sl.putConstraint(SpringLayout.WEST,  self.dailyObsSP,  0, SpringLayout.WEST,  lblObsDaily)
+		sl.putConstraint(SpringLayout.EAST,  self.dailyObsSP, -20, SpringLayout.EAST, content)
+		sl.putConstraint(SpringLayout.SOUTH, self.dailyObsSP, 170, SpringLayout.SOUTH, lblObsDaily)
+		content.add(self.dailyObsSP)
+		
+		
+		# Daily Section Label
+		lblDaily = JLabel("Daily Hydropower Overrides")
+		lblDaily.setFont(Font("Tahoma", Font.BOLD, 14))
+		sl.putConstraint(SpringLayout.NORTH, lblDaily, 10, SpringLayout.SOUTH, self.dailyObsSP)
+		sl.putConstraint(SpringLayout.WEST,  lblDaily, 10, SpringLayout.WEST,  lblRes)
+		content.add(lblDaily)
 		
 		self.btnLoadDaily = JButton("Load Daily Data")
 		self.btnLoadDaily.addActionListener(self)
@@ -339,6 +399,8 @@ class HOT(JDialog, ActionListener):
 			self.import_Forecast_Data()
 		if src is self.btnImportPhysical:
 			self.import_Physical_Data()
+		elif src is self.btnLoadDailyObs:
+			self.load_DailyObs()
 		elif src is self.btnLoadDaily:
 			self.load_Daily()
 		elif src is self.btnCompHrPeak:
@@ -370,6 +432,18 @@ class HOT(JDialog, ActionListener):
 	def import_Forecast_Data(self):
 		cwmsFile.setTimeWindow(start_time, end_time)
 		
+		OBS_Turbine_1D = cwmsFile.read(ObservedTurbine)
+		OBS_Power_1D = cwmsFile.read(ObservedPower)
+		
+		#Mod_Turbine_1D = OBS_Turbine_1D.screenWithMaxMin(0.1, 1000000.0, 1000000.0, 1, -0.1, "Q")
+		#Mod_EF_1D = OBS_Power_1D.divide(Mod_Turbine_1D.divide(1000))
+		#OBS_EF_1D = Mod_EF_1D.screenWithMaxMin(0.0, 1000000.0, 1000000.0, 1, 0.0, "Q")
+		OBS_EF_1D = OBS_Power_1D.divide(OBS_Turbine_1D.divide(1000))
+		
+		OBS_EF_1D.setPathname("//"+ProjectName+"-"+PowerName+"/EF//1Day/Obs/")
+		OBS_Turbine_1D.setPathname("//"+ProjectName+"-"+PowerName+"/Flow//1Day/Obs/")
+		OBS_Power_1D.setPathname("//"+ProjectName+"-"+PowerName+"/Power//1Day/Obs/")
+		
 		CWMS_PoolElev_1H = cwmsFile.read("//"+ProjectName+"-Pool/Elev//1Hour/"+ActiveRSSAlt_Fpart+"/")
 		CWMS_PoolStor_1H = cwmsFile.read("//"+ProjectName+"-Pool/Stor//1Hour/"+ActiveRSSAlt_Fpart+"/")
 		CWMS_Inflow_1H = cwmsFile.read("//"+ProjectName+"-Pool/Flow-IN//1Hour/"+ActiveRSSAlt_Fpart+"/")
@@ -397,6 +471,9 @@ class HOT(JDialog, ActionListener):
 			CWMS_Outlets_1H.append(ts_hr)
 			CWMS_Outlets_1D.append(ts_d)
 		
+		HOTFile.write(OBS_Turbine_1D)
+		HOTFile.write(OBS_Power_1D)
+		HOTFile.write(OBS_EF_1D)
 		HOTFile.write(CWMS_PoolElev_1H)
 		HOTFile.write(CWMS_PoolStor_1H)
 		HOTFile.write(CWMS_Inflow_1H)
@@ -500,6 +577,71 @@ class HOT(JDialog, ActionListener):
 		MessageBox.showInformation("Physical Data Extracted.", "Data Extract Complete")
 		
 		
+####	Load daily data from HOT.dss to daily table
+	def load_DailyObs(self):
+		HOTFile.setTimeWindow(Obs_start_string, forecast_time)
+		
+		PoolElev_1D = HOTFile.get("//"+ProjectName+"-Pool/Elev//1Day/"+ActiveRSSAlt_Fpart+"/")
+		Inflow_1D = HOTFile.get("//"+ProjectName+"-Pool/Flow-IN//1Day/"+ActiveRSSAlt_Fpart+"/")
+		Outflow_1D = HOTFile.get("//"+ProjectName+"-Pool/Flow-OUT//1Day/"+ActiveRSSAlt_Fpart+"/")
+		Power_1D = HOTFile.get("//"+ProjectName+"-"+PowerName+"/Power//1Day/Obs/")
+		EF_1D = HOTFile.get("//"+ProjectName+"-"+PowerName+"/EF//1Day/Obs/")
+		NoUnits_1D = HOTFile.get("//"+ProjectName+"-"+PowerName+"/Units//1Day/"+ActiveRSSAlt_Fpart+"/")
+		Turbine_1D = HOTFile.get("//"+ProjectName+"-"+PowerName+"/Flow//1Day/Obs/")
+		outletTS_1D = []
+		for o in OutletNames:
+			path = "//%s-%s/Flow//1Day/%s/" % (ProjectName, o, ActiveRSSAlt_Fpart)
+			tsc = HOTFile.get(path)
+			outletTS_1D.append(tsc)
+		
+		# Helpers to safely fetch/round values (avoid IndexError when series are shorter)
+		def safe_val(ts, idx):
+			if ts is None or ts.values is None: return None
+			vals = ts.values
+			return vals[idx] if 0 <= idx < len(vals) else None
+		
+		def r(v, nd):
+			if v is None: return ""
+			try: return round(v, nd)
+			except: return ""
+		
+		def r10(v):
+			if v is None: return ""
+			try: return round(v, -1)
+			except: return ""
+		
+		start = date(obsStart_time.year(), obsStart_time.month(), obsStart_time.day())
+		forecast = date(obsEnd_time.year(), obsEnd_time.month(), obsEnd_time.day())
+		
+		dailyObsData = []
+		for dayIndex in range(obs_window):
+			current = start + timedelta(days=dayIndex)
+			# Negative-day label relative to forecast_time (forecast day = 0)
+			day_label = "Day %d" % ((current - forecast).days -1)
+			row = [
+				day_label,
+				current.strftime("%d-%b, %a"),
+				r(safe_val(PoolElev_1D,	dayIndex), 2),
+				r(safe_val(Inflow_1D,	dayIndex), 0),
+				r(safe_val(Power_1D,	dayIndex), 0),
+				r(safe_val(EF_1D,		dayIndex), 0),
+				r(safe_val(NoUnits_1D,	dayIndex), 0),
+				r10(safe_val(Turbine_1D, dayIndex)),
+			]
+			flows = [r10(safe_val(ts, dayIndex)) for ts in outletTS_1D]
+			row.extend(flows)
+			row.append(r10(safe_val(Outflow_1D, dayIndex)))
+			dailyObsData.append(row)
+			
+		self.dailyObsModel = MyTableModel(dailyObsData, self.dailyObsCols, self.dailyObsEditableCols)
+		self.dailyObsTable.setModel(self.dailyObsModel)
+		# scroll to bottom once the new model is laid out
+		def _scrollToBottom():
+			sb = self.dailyObsSP.getVerticalScrollBar()
+			sb.setValue(sb.getMaximum())
+		SwingUtilities.invokeLater(_scrollToBottom)
+		
+	
 ####	Load daily data from HOT.dss to daily table
 	def load_Daily(self):
 		HOTFile.setTimeWindow(HOT_start_string, end_time)
